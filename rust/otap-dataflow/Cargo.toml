@@ -415,6 +415,16 @@ crypto-openssl = ["otel-arrow-dfe-otap/crypto-openssl", "otel-arrow-dfe-contrib-
 crypto-ring = ["otel-arrow-dfe-otap/crypto-ring", "otel-arrow-dfe-contrib-extensions/crypto-ring"]
 crypto-symcrypt = ["otel-arrow-dfe-otap/crypto-symcrypt", "otel-arrow-dfe-contrib-extensions/crypto-symcrypt"]
 
+# Generic mTLS transport integration for the OTLP exporters/receivers.
+# Off by default. Enables the engine capability traits and the rustls-based
+# node glue; a bound extension supplies the actual rustls Client/ServerConfig
+# at runtime. Requires a crypto-* provider (e.g. crypto-ring) for the rustls
+# process-default provider.
+mtls-transport = [
+    "otel-arrow-dfe-engine/mtls-capability",
+    "otel-arrow-dfe-core-nodes/mtls-transport",
+]
+
 # Memory allocators and profiling.
 dhat-heap = [
     "dep:dhat",
