@@ -94,6 +94,11 @@ pub struct OtlpHttpExporter {
     /// `Authorization: Bearer <token>` is injected on every outgoing
     /// request; when absent, the exporter behaves exactly as before.
     token_provider: Option<Box<dyn BearerTokenProvider>>,
+    /// Optional capability-supplied mTLS client config (from a bound extension). When
+    /// bound, its `rustls::ClientConfig` is applied to every pooled client,
+    /// taking over TLS auth while preserving the exporter's other defaults.
+    #[cfg(feature = "mtls-transport")]
+    mtls_client: Option<Box<dyn otap_df_engine::local::capability::MtlsClientProvider>>,
 }
 
 /// Declare the OTLP HTTP Exporter as a local exporter factory
@@ -132,16 +137,44 @@ fn factory_create(
     exporter_config: &ExporterConfig,
     capabilities: &otap_df_engine::capability::registry::Capabilities,
 ) -> Result<ExporterWrapper<OtapPdata>, ConfigError> {
-    // Optionally resolve a bound bearer token provider. Absent binding keeps the
-    // default (no-auth) behavior; a bound provider (e.g. the `azure_identity_auth`
-    // extension) supplies refreshed OAuth tokens.
+    // Optionally resolve a bound bearer token provider. Absent binding keeps
+    // the default (no-auth) behavior; a bound provider supplies refreshed
+    // bearer tokens.
     let token_provider = capabilities
         .optional_local::<otap_df_engine::capability::auth::bearer_token_provider::BearerTokenProvider>()
         .map_err(|e| ConfigError::InvalidUserConfig {
             error: e.to_string(),
         })?;
+
+    #[cfg_attr(not(feature = "mtls-transport"), allow(unused_mut))]
+    let mut exporter = OtlpHttpExporter::from_config(pipeline, &node_config.config, token_provider)?;
+
+    #[cfg(feature = "mtls-transport")]
+    {
+        exporter.mtls_client = capabilities
+            .optional_local::<otap_df_engine::capability::mtls_client_provider::MtlsClientProvider>(
+            )
+            .map_err(|e| ConfigError::InvalidUserConfig {
+                error: format!("mtls_client_provider binding error: {e}"),
+            })?;
+        // When the capability owns TLS, exporter-level client cert/key TLS is
+        // a configuration conflict -- fail fast rather than silently ignore it.
+        if exporter.mtls_client.is_some() {
+            if let Some(tls) = &exporter.config.http.tls {
+                if tls.config.cert_file.is_some() || tls.config.key_file.is_some() {
+                    return Err(ConfigError::InvalidUserConfig {
+                        error: "mtls_client_provider capability is bound but http.tls.cert_file / \
+                                http.tls.key_file are also set; the capability owns TLS auth -- \
+                                remove the cert/key files or unbind the capability"
+                            .into(),
+                    });
+                }
+            }
+        }
+    }
+
     Ok(ExporterWrapper::local(
-        OtlpHttpExporter::from_config(pipeline, &node_config.config, token_provider)?,
+        exporter,
         node,
         node_config,
         exporter_config,
@@ -231,6 +264,8 @@ impl OtlpHttpExporter {
             config,
             pdata_metrics,
             token_provider,
+            #[cfg(feature = "mtls-transport")]
+            mtls_client: None,
         })
     }
 }
@@ -282,15 +317,21 @@ impl Exporter<OtapPdata> for OtlpHttpExporter {
         );
 
         let max_in_flight = self.config.max_in_flight.max(1);
-        let mut client_pool =
-            HttpClientPool::try_new(&self.config.http, self.config.client_pool_size)
-                .await
-                .map_err(|e| EngineError::ExporterError {
-                    exporter: effect_handler.exporter_id(),
-                    kind: ExporterErrorKind::Configuration,
-                    error: "unable to initialize HTTP client pool".into(),
-                    source_detail: e.to_string(),
-                })?;
+        let mut client_pool = HttpClientPool::try_new(
+            &self.config.http,
+            self.config.client_pool_size,
+            #[cfg(feature = "mtls-transport")]
+            self.mtls_client.as_deref(),
+            #[cfg(feature = "mtls-transport")]
+            self.config.endpoint.as_str(),
+        )
+        .await
+        .map_err(|e| EngineError::ExporterError {
+            exporter: effect_handler.exporter_id(),
+            kind: ExporterErrorKind::Configuration,
+            error: "unable to initialize HTTP client pool".into(),
+            source_detail: e.to_string(),
+        })?;
 
         let mut inflight_exports = InFlightExports::new();
 
@@ -993,6 +1034,10 @@ impl HttpClientPool {
     async fn try_new(
         client_settings: &HttpClientSettings,
         pool_size: NonZeroUsize,
+        #[cfg(feature = "mtls-transport")] mtls_client: Option<
+            &dyn otap_df_engine::local::capability::MtlsClientProvider,
+        >,
+        #[cfg(feature = "mtls-transport")] endpoint: &str,
     ) -> Result<Self, HttpClientError> {
         // Build the user-configured static headers first (pre-sized for the two
         // protocol headers added below) so the protocol headers always win on
@@ -1016,6 +1061,27 @@ impl HttpClientPool {
                 .client_builder()
                 .await?
                 .default_headers(default_headers.clone());
+            // When an mTLS capability is bound, apply its rustls ClientConfig.
+            // `use_preconfigured_tls` replaces reqwest's TLS config wholesale
+            // (TLS takeover) while leaving timeouts/headers/etc. intact.
+            #[cfg(feature = "mtls-transport")]
+            let client_builder = match mtls_client {
+                Some(provider) => {
+                    let tls_config = provider
+                        .client_tls_config(
+                            otap_df_engine::capability::mtls_client_provider::ClientTlsRequest::new(
+                                endpoint,
+                            ),
+                        )
+                        .map_err(|e| {
+                            HttpClientError::InvalidConfig(format!(
+                                "mtls_client_provider failed to build ClientConfig: {e}"
+                            ))
+                        })?;
+                    client_builder.use_preconfigured_tls(tls_config)
+                }
+                None => client_builder,
+            };
             pool.push(client_builder.build()?);
         }
 

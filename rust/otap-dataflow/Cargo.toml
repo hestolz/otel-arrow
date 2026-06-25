@@ -333,6 +333,16 @@ crypto-aws-lc = ["otap-df-otap/crypto-aws-lc", "otap-df-contrib-extensions/crypt
 crypto-symcrypt = ["otap-df-otap/crypto-symcrypt"]
 crypto-openssl = ["otap-df-otap/crypto-openssl", "otap-df-contrib-extensions/crypto-openssl"]
 
+# Generic mTLS transport integration for the OTLP exporters/receivers.
+# Off by default. Enables the engine capability traits and the rustls-based
+# node glue; a bound extension supplies the actual rustls Client/ServerConfig
+# at runtime. Requires a crypto-* provider (e.g. crypto-ring) for the rustls
+# process-default provider.
+mtls-transport = [
+    "otap-df-engine/mtls-capability",
+    "otap-df-core-nodes/mtls-transport",
+]
+
 # Contrib exporters (opt-in) - now in contrib-nodes
 contrib-exporters = ["otap-df-contrib-nodes/contrib-exporters"]
 geneva-exporter = ["otap-df-contrib-nodes/geneva-exporter"]

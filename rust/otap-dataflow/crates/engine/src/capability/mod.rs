@@ -49,6 +49,13 @@ pub(crate) mod factory;
 pub mod registry;
 pub mod vendor_bundle;
 
+/// Generic mTLS client-transport capability (`mtls_client_provider`).
+#[cfg(feature = "mtls-capability")]
+pub mod mtls_client_provider;
+/// Generic mTLS server-transport capability (`mtls_server_provider`).
+#[cfg(feature = "mtls-capability")]
+pub mod mtls_server_provider;
+
 pub use error::{CapabilityError, CapabilityErrorSource};
 pub use factory::{LocalInstanceFactory, SharedInstanceFactory};
 

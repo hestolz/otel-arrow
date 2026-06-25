@@ -32,3 +32,8 @@ pub mod auth {
 pub mod vendor_bundle {
     pub use crate::capability::vendor_bundle::shared::VendorBundle;
 }
+
+#[cfg(feature = "mtls-capability")]
+pub use crate::capability::mtls_client_provider::shared::MtlsClientProvider;
+#[cfg(feature = "mtls-capability")]
+pub use crate::capability::mtls_server_provider::shared::MtlsServerProvider;

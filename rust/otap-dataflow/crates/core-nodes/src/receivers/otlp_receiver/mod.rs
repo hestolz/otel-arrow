@@ -191,6 +191,11 @@ pub struct OTLPReceiver {
     // Global concurrency cap derived from downstream capacity. When both gRPC and HTTP are
     // enabled, this prevents combined ingress from exceeding what the pipeline can absorb.
     global_max_concurrent_requests: Option<usize>,
+    /// Optional capability-supplied mTLS server config (from a bound extension). When
+    /// bound, the gRPC server's TLS acceptor is built from its
+    /// `rustls::ServerConfig`, taking over inbound TLS auth.
+    #[cfg(feature = "mtls-transport")]
+    mtls_server: Option<Box<dyn otap_df_engine::shared::capability::MtlsServerProvider>>,
 }
 
 /// Declares the OTLP receiver as a shared receiver factory.
@@ -212,6 +217,30 @@ pub static OTLP_RECEIVER: ReceiverFactory<OtapPdata> = ReceiverFactory {
                 error: error.to_string(),
             })?;
         receiver.tune_max_concurrent_requests(receiver_config.output_pdata_channel.capacity);
+
+        #[cfg(feature = "mtls-transport")]
+        {
+            receiver.mtls_server = _capabilities
+                .optional_shared::<otap_df_engine::capability::mtls_server_provider::MtlsServerProvider>()
+                .map_err(|e| otap_df_config::error::Error::InvalidUserConfig {
+                    error: format!("mtls_server_provider binding error: {e}"),
+                })?;
+            if receiver.mtls_server.is_some() {
+                if let Some(grpc) = &receiver.config.protocols.grpc {
+                    if let Some(tls) = &grpc.tls {
+                        if tls.config.cert_file.is_some() || tls.config.key_file.is_some() {
+                            return Err(otap_df_config::error::Error::InvalidUserConfig {
+                                error: "mtls_server_provider capability is bound but \
+                                        grpc.tls.cert_file / grpc.tls.key_file are also set; the \
+                                        capability owns TLS auth -- remove the cert/key files or \
+                                        unbind the capability"
+                                    .into(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(ReceiverWrapper::shared(
             receiver,
@@ -279,6 +308,8 @@ impl OTLPReceiver {
             ),
             rate_limiter: None,
             global_max_concurrent_requests: None,
+            #[cfg(feature = "mtls-transport")]
+            mtls_server: None,
         })
     }
 
@@ -591,6 +622,39 @@ impl shared::Receiver<OtapPdata> for OTLPReceiver {
                 .add_service(metrics_server.expect("gRPC enabled but metrics_server is None"))
                 .add_service(traces_server.expect("gRPC enabled but traces_server is None"));
 
+            // When the mTLS server capability is bound, derive the TLS acceptor
+            // from its rustls ServerConfig (mTLS takeover). Otherwise use
+            // the receiver's own cert/key TLS settings.
+            #[cfg(feature = "mtls-transport")]
+            let maybe_tls_acceptor = if let Some(provider) = self.mtls_server.as_deref() {
+                let mut server_config = provider
+                    .server_tls_config(
+                        otap_df_engine::capability::mtls_server_provider::ServerTlsRequest::new(
+                            grpc_config.listening_addr.to_string(),
+                        ),
+                    )
+                    .map_err(|e| Error::ReceiverError {
+                        receiver: effect_handler.receiver_id(),
+                        kind: ReceiverErrorKind::Configuration,
+                        error: format!("mtls_server_provider failed to build ServerConfig: {e}"),
+                        source_detail: String::new(),
+                    })?;
+                // The capability returns a protocol-neutral ServerConfig; gRPC
+                // requires HTTP/2, so advertise the `h2` ALPN protocol (matching
+                // the cert/key path in `tls_utils::build_tls_acceptor`).
+                server_config.alpn_protocols = vec![b"h2".to_vec()];
+                Some(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+            } else {
+                build_tls_acceptor(grpc_config.tls.as_ref())
+                    .await
+                    .map_err(|e| Error::ReceiverError {
+                        receiver: effect_handler.receiver_id(),
+                        kind: ReceiverErrorKind::Configuration,
+                        error: format!("Failed to configure TLS: {}", e),
+                        source_detail: format_error_sources(&e),
+                    })?
+            };
+            #[cfg(not(feature = "mtls-transport"))]
             let maybe_tls_acceptor =
                 build_tls_acceptor(grpc_config.tls.as_ref())
                     .await

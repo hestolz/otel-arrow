@@ -57,6 +57,9 @@ tonic-middleware.workspace = true
 tonic.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true
+rustls = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
 parking_lot.workspace = true
 http.workspace = true
 secrecy.workspace = true
@@ -83,6 +86,17 @@ dev-tools = [
     "dep:weaver_semconv",
 ]
 bench = []
+# OTLP exporter/receiver integration with the generic mTLS transport
+# capabilities. Turns on the engine capability traits and pulls the
+# rustls-based glue the OTLP exporters/receivers use to apply a
+# capability-supplied TLS config. A bound extension provides the actual
+# rustls Client/ServerConfig at runtime.
+mtls-transport = [
+    "otap-df-engine/mtls-capability",
+    "dep:rustls",
+    "dep:hyper-util",
+    "dep:tokio-rustls",
+]
 
 [dev-dependencies]
 arrow-ipc.workspace = true

@@ -17,6 +17,12 @@ testing = []
 jemalloc = ["dep:tikv-jemalloc-ctl", "dep:tikv-jemalloc-sys"]
 jemalloc-testing = ["jemalloc"]
 test-utils = []
+# Generic mTLS transport capabilities (mtls_client_provider /
+# mtls_server_provider). Pulls in `rustls` so the capability traits can
+# yield rustls Client/ServerConfig. Off by default; enabled by node
+# transports that consume the capabilities and by extensions that provide
+# them.
+mtls-capability = ["dep:rustls"]
 
 [dependencies]
 otap-df-channel = { workspace = true }
@@ -48,6 +54,7 @@ futures-core = { workspace = true }
 async-channel = { workspace = true }
 uuid = { workspace = true }
 data-encoding = { workspace = true }
+rustls = { workspace = true, optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { workspace = true, optional = true }

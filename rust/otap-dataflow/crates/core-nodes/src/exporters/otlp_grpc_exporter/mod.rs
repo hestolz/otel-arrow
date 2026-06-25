@@ -107,6 +107,11 @@ pub struct OTLPExporter {
     /// `authorization: Bearer <token>` is injected on every outgoing request;
     /// when absent, the exporter behaves exactly as before.
     token_provider: Option<Box<dyn BearerTokenProvider>>,
+    /// Optional capability-supplied mTLS client config (from a bound extension). When
+    /// bound, channels are built with a `tokio-rustls` connector using its
+    /// `rustls::ClientConfig` instead of the exporter's own TLS settings.
+    #[cfg(feature = "mtls-transport")]
+    mtls_client: Option<Box<dyn otap_df_engine::local::capability::MtlsClientProvider>>,
 }
 
 /// Declare the OTLP Exporter as a local exporter factory
@@ -128,8 +133,34 @@ pub static OTLP_EXPORTER: ExporterFactory<OtapPdata> = ExporterFactory {
             .map_err(|e| otap_df_config::error::Error::InvalidUserConfig {
                 error: e.to_string(),
             })?;
+
+        #[cfg_attr(not(feature = "mtls-transport"), allow(unused_mut))]
+        let mut exporter = OTLPExporter::from_config(pipeline, &node_config.config, token_provider)?;
+
+        #[cfg(feature = "mtls-transport")]
+        {
+            exporter.mtls_client = capabilities
+                .optional_local::<otap_df_engine::capability::mtls_client_provider::MtlsClientProvider>(
+                )
+                .map_err(|e| otap_df_config::error::Error::InvalidUserConfig {
+                    error: format!("mtls_client_provider binding error: {e}"),
+                })?;
+            if exporter.mtls_client.is_some() {
+                if let Some(tls) = &exporter.config.grpc.tls {
+                    if tls.config.cert_file.is_some() || tls.config.key_file.is_some() {
+                        return Err(otap_df_config::error::Error::InvalidUserConfig {
+                            error: "mtls_client_provider capability is bound but grpc.tls.cert_file / \
+                                grpc.tls.key_file are also set; the capability owns TLS auth -- \
+                                remove the cert/key files or unbind the capability"
+                                .into(),
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(ExporterWrapper::local(
-            OTLPExporter::from_config(pipeline, &node_config.config, token_provider)?,
+            exporter,
             node,
             node_config,
             exporter_config,
@@ -158,6 +189,79 @@ fn validate_config(config: &serde_json::Value) -> Result<(), otap_df_config::err
     Ok(())
 }
 
+/// Builds a lazy gRPC [`Channel`] that secures every connection with a
+/// capability-supplied [`rustls::ClientConfig`] (custom mTLS).
+///
+/// tonic 0.14 (with its TLS feature enabled) reserves `https` endpoint URIs for
+/// its *own* TLS stack -- which only accepts cert/CA-based configs, not a raw
+/// rustls config with a custom verifier/resolver, and rejects custom-connector
+/// TLS for `https` URIs. So we hand tonic an `http` URI (it routes the hop to
+/// the connector without applying its own TLS) and [`RustlsMtlsConnector`]
+/// unconditionally performs the mTLS handshake on the TCP stream it opens.
+/// Note: custom connectors do not inherit every endpoint-applied TCP option --
+/// the connector sets `TCP_NODELAY` and uses defaults otherwise.
+#[cfg(feature = "mtls-transport")]
+fn mtls_connect_channel_lazy(
+    grpc: &GrpcClientSettings,
+    mut client_config: rustls::ClientConfig,
+) -> Result<Channel, tonic::transport::Error> {
+    // gRPC is carried over HTTP/2; advertise the `h2` ALPN protocol.
+    client_config.alpn_protocols = vec![b"h2".to_vec()];
+
+    let connector = RustlsMtlsConnector {
+        tls: tokio_rustls::TlsConnector::from(Arc::new(client_config)),
+    };
+
+    let http_uri = grpc.grpc_endpoint.replacen("https://", "http://", 1);
+    let endpoint = tonic::transport::Endpoint::from_shared(http_uri)?;
+    Ok(endpoint.connect_with_connector_lazy(connector))
+}
+
+/// A tonic connector that opens a TCP connection and always secures it with the
+/// configured [`rustls::ClientConfig`] (custom mTLS), independent of URI scheme.
+///
+/// Used in place of tonic's built-in TLS because tonic cannot be given a raw
+/// rustls `ClientConfig` carrying a custom verifier/resolver.
+#[cfg(feature = "mtls-transport")]
+#[derive(Clone)]
+struct RustlsMtlsConnector {
+    tls: tokio_rustls::TlsConnector,
+}
+
+#[cfg(feature = "mtls-transport")]
+impl tower::Service<http::Uri> for RustlsMtlsConnector {
+    type Response = hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: http::Uri) -> Self::Future {
+        let tls = self.tls.clone();
+        Box::pin(async move {
+            let host = uri
+                .host()
+                .ok_or_else(|| "grpc endpoint is missing a host".to_string())?
+                .to_string();
+            let port = uri.port_u16().unwrap_or(443);
+            let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+                .map_err(|e| format!("invalid TLS server name '{host}': {e}"))?;
+
+            let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+            tcp.set_nodelay(true)?;
+            let tls_stream = tls.connect(server_name, tcp).await?;
+            Ok(hyper_util::rt::TokioIo::new(tls_stream))
+        })
+    }
+}
+
 impl OTLPExporter {
     /// create a new instance of the `[OTLPExporter]` from json config value
     pub fn from_config(
@@ -177,6 +281,8 @@ impl OTLPExporter {
             config,
             pdata_metrics,
             token_provider,
+            #[cfg(feature = "mtls-transport")]
+            mtls_client: None,
         })
     }
 }
@@ -212,6 +318,49 @@ impl Exporter<OtapPdata> for OTLPExporter {
         let num_connections = self.config.num_connections.max(1);
         let mut channels = Vec::with_capacity(num_connections);
         for _ in 0..num_connections {
+            // When an mTLS capability is bound, build the channel with a
+            // tokio-rustls connector using the capability's rustls
+            // ClientConfig (mTLS takeover). Otherwise use the exporter's
+            // own TLS/proxy path.
+            #[cfg(feature = "mtls-transport")]
+            let channel = if let Some(provider) = self.mtls_client.as_deref() {
+                let tls_config = provider
+                    .client_tls_config(
+                        otap_df_engine::capability::mtls_client_provider::ClientTlsRequest::new(
+                            self.config.grpc.grpc_endpoint.as_str(),
+                        ),
+                    )
+                    .map_err(|e| Error::ExporterError {
+                        exporter: exporter_id.clone(),
+                        kind: ExporterErrorKind::Connect,
+                        error: format!("mtls_client_provider failed to build ClientConfig: {e}"),
+                        source_detail: String::new(),
+                    })?;
+                mtls_connect_channel_lazy(&self.config.grpc, tls_config).map_err(|e| {
+                    let source_detail = format_error_sources(&e);
+                    Error::ExporterError {
+                        exporter: exporter_id.clone(),
+                        kind: ExporterErrorKind::Connect,
+                        error: format!("grpc mtls channel error {e}"),
+                        source_detail,
+                    }
+                })?
+            } else {
+                self.config
+                    .grpc
+                    .connect_channel_lazy(None)
+                    .await
+                    .map_err(|e| {
+                        let source_detail = format_error_sources(&e);
+                        Error::ExporterError {
+                            exporter: exporter_id.clone(),
+                            kind: ExporterErrorKind::Connect,
+                            error: format!("grpc channel error {e}"),
+                            source_detail,
+                        }
+                    })?
+            };
+            #[cfg(not(feature = "mtls-transport"))]
             let channel = self
                 .config
                 .grpc
