@@ -36,6 +36,8 @@ use otel_arrow_dfe_engine::terminal_state::TerminalState;
 use otel_arrow_dfe_otap::OTAP_EXPORTER_FACTORIES;
 use otel_arrow_dfe_otap::metrics::{CompletedExporterAttempt, ExporterAttempt};
 use otel_arrow_dfe_otap::otap_grpc::client_settings::GrpcClientSettings;
+#[cfg(feature = "mtls-transport")]
+use otel_arrow_dfe_otap::otap_grpc::client_settings::{GrpcEndpointError, StartupCheck};
 use otel_arrow_dfe_otap::otap_grpc::otlp::client::{
     LogsServiceClient, MetricsServiceClient, TraceServiceClient,
 };
@@ -146,17 +148,29 @@ pub static OTLP_EXPORTER: ExporterFactory<OtapPdata> = ExporterFactory {
                 .map_err(|e| otel_arrow_dfe_config::error::Error::InvalidUserConfig {
                     error: format!("mtls_client_provider binding error: {e}"),
                 })?;
-            if exporter.mtls_client.is_some() {
-                if let Some(tls) = &exporter.config.grpc.tls {
-                    if tls.config.cert_file.is_some() || tls.config.key_file.is_some() {
-                        return Err(otel_arrow_dfe_config::error::Error::InvalidUserConfig {
-                            error:
-                                "mtls_client_provider capability is bound but grpc.tls.cert_file / \
-                                grpc.tls.key_file are also set; the capability owns TLS auth -- \
-                                remove the cert/key files or unbind the capability"
-                                    .into(),
-                        });
-                    }
+            if exporter.mtls_client.is_some()
+                && let Some(tls) = &exporter.config.grpc.tls
+            {
+                let cert_configured = tls.config.cert_file.is_some()
+                    || tls
+                        .config
+                        .cert_pem
+                        .as_ref()
+                        .is_some_and(|pem| !pem.trim().is_empty());
+                let key_configured = tls.config.key_file.is_some()
+                    || tls
+                        .config
+                        .key_pem
+                        .as_ref()
+                        .is_some_and(|pem| !pem.trim().is_empty());
+                if cert_configured || key_configured {
+                    return Err(otel_arrow_dfe_config::error::Error::InvalidUserConfig {
+                        error: "mtls_client_provider capability is bound but grpc.tls \
+                                client identity fields (cert_file/cert_pem/key_file/key_pem) are \
+                                also set; the capability owns TLS auth -- remove those fields or \
+                                unbind the capability"
+                            .into(),
+                    });
                 }
             }
         }
@@ -218,6 +232,56 @@ fn mtls_connect_channel_lazy(
     let http_uri = grpc.grpc_endpoint.replacen("https://", "http://", 1);
     let endpoint = tonic::transport::Endpoint::from_shared(http_uri)?;
     Ok(endpoint.connect_with_connector_lazy(connector))
+}
+
+/// Builds an eager gRPC [`Channel`] secured by a capability-supplied
+/// [`rustls::ClientConfig`].
+///
+/// Used by capability-aware `startup_check: connect` so startup validation and
+/// steady-state runtime traffic share the same TLS path.
+#[cfg(feature = "mtls-transport")]
+async fn mtls_connect_channel(
+    grpc: &GrpcClientSettings,
+    mut client_config: rustls::ClientConfig,
+) -> Result<Channel, tonic::transport::Error> {
+    // gRPC is carried over HTTP/2; advertise the `h2` ALPN protocol.
+    client_config.alpn_protocols = vec![b"h2".to_vec()];
+
+    let connector = RustlsMtlsConnector {
+        tls: tokio_rustls::TlsConnector::from(Arc::new(client_config)),
+    };
+
+    let http_uri = grpc.grpc_endpoint.replacen("https://", "http://", 1);
+    let endpoint = tonic::transport::Endpoint::from_shared(http_uri)?;
+    endpoint.connect_with_connector(connector).await
+}
+
+/// Runs startup checks, using the capability-owned mTLS path for
+/// `startup_check: connect` when a provider is bound.
+#[cfg(feature = "mtls-transport")]
+async fn run_startup_check_with_optional_mtls(
+    grpc: &GrpcClientSettings,
+    mtls_client: Option<&dyn otel_arrow_dfe_engine::local::capability::MtlsClientProvider>,
+) -> Result<(), GrpcEndpointError> {
+    match (grpc.startup_check, mtls_client) {
+        (StartupCheck::Connect, Some(provider)) => {
+            let tls_config = provider
+                .client_tls_config(
+                    otel_arrow_dfe_engine::capability::mtls_client_provider::ClientTlsRequest::new(
+                        grpc.grpc_endpoint.as_str(),
+                    ),
+                )
+                .map_err(|e| {
+                    GrpcEndpointError::InvalidConfig(format!(
+                        "mtls_client_provider failed to build ClientConfig: {e}"
+                    ))
+                })?;
+            let channel = mtls_connect_channel(grpc, tls_config).await?;
+            drop(channel);
+            Ok(())
+        }
+        _ => grpc.run_startup_check().await,
+    }
 }
 
 /// A tonic connector that opens a TCP connection and always secures it with the
@@ -309,9 +373,16 @@ impl Exporter<OtapPdata> for OTLPExporter {
 
         let exporter_id = effect_handler.exporter_id();
 
-        // Run the optional startup check (dns resolution or eager connect) before creating the
-        // lazy channels used for normal runtime traffic.
-        self.config.grpc.run_startup_check().await.map_err(|e| {
+        // Run the optional startup check (dns resolution or eager connect)
+        // before creating the lazy channels used for normal runtime traffic.
+        #[cfg(feature = "mtls-transport")]
+        let startup_check =
+            run_startup_check_with_optional_mtls(&self.config.grpc, self.mtls_client.as_deref())
+                .await;
+        #[cfg(not(feature = "mtls-transport"))]
+        let startup_check = self.config.grpc.run_startup_check().await;
+
+        startup_check.map_err(|e| {
             let source_detail = format_error_sources(&e);
             Error::ExporterError {
                 exporter: exporter_id.clone(),
@@ -1818,6 +1889,8 @@ mod tests {
                 },
                 metrics: OtlpGrpcExporterMetrics::register(&pipeline_ctx, None),
                 auth_provider: None,
+                #[cfg(feature = "mtls-transport")]
+                mtls_client: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -1943,6 +2016,8 @@ mod tests {
                 },
                 metrics: OtlpGrpcExporterMetrics::register(&pipeline_ctx, None),
                 auth_provider: None,
+                #[cfg(feature = "mtls-transport")]
+                mtls_client: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2072,6 +2147,8 @@ mod tests {
                 },
                 metrics: OtlpGrpcExporterMetrics::register(&pipeline_ctx, None),
                 auth_provider: Some(Box::new(provider)),
+                #[cfg(feature = "mtls-transport")]
+                mtls_client: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2230,6 +2307,8 @@ mod tests {
                 },
                 metrics: OtlpGrpcExporterMetrics::register(&pipeline_ctx, None),
                 auth_provider: Some(Box::new(MockHttpClientAuthProvider::never_publishes())),
+                #[cfg(feature = "mtls-transport")]
+                mtls_client: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2346,6 +2425,8 @@ mod tests {
                 },
                 metrics: OtlpGrpcExporterMetrics::register(&pipeline_ctx, None),
                 auth_provider: None,
+                #[cfg(feature = "mtls-transport")]
+                mtls_client: None,
             },
             node_id.clone(),
             node_config,
@@ -2940,6 +3021,8 @@ mod tests {
                 },
                 metrics: OtlpGrpcExporterMetrics::register(&pipeline_ctx, None),
                 auth_provider,
+                #[cfg(feature = "mtls-transport")]
+                mtls_client: None,
             },
             node_id.clone(),
             node_config,

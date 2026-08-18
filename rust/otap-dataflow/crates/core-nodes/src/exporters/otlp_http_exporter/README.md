@@ -287,6 +287,40 @@ rejected request and are treated as retryable. The exporter does not reuse that
 generation and resumes after the provider publishes a replacement. A delayed
 401 for an older generation does not invalidate a newer credential.
 
+## mTLS capability binding
+
+When built with the `mtls-transport` feature, the exporter can source outbound
+mTLS from a bound `mtls_client_provider` capability instead of `http.tls`
+identity fields in node config.
+
+```yaml
+groups:
+  default:
+    pipelines:
+      main:
+        extensions:
+          mtls_provider:
+            type: "urn:example:extension:mtls_provider"
+            config: {}
+
+        nodes:
+          otlp-http-exporter:
+            type: "urn:otel:exporter:otlp_http"
+            capabilities:
+              mtls_client_provider: mtls_provider
+            config:
+              endpoint: "https://otlp.example.com:4318"
+              client_pool_size: 1
+              http: {}
+```
+
+Behavior when the capability is bound:
+
+- HTTP clients use the capability-provided `rustls::ClientConfig` through
+  reqwest's preconfigured TLS hook.
+- `http.tls` client identity fields (`cert_file`, `cert_pem`, `key_file`,
+  `key_pem`) must not be set at the same time; that configuration is rejected.
+
 ## Examples
 
 With one signal-specific URL:
