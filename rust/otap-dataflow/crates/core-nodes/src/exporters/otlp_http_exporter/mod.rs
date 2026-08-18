@@ -165,16 +165,29 @@ fn factory_create(
             })?;
         // When the capability owns TLS, exporter-level client cert/key TLS is
         // a configuration conflict -- fail fast rather than silently ignore it.
-        if exporter.mtls_client.is_some() {
-            if let Some(tls) = &exporter.config.http.tls {
-                if tls.config.cert_file.is_some() || tls.config.key_file.is_some() {
-                    return Err(ConfigError::InvalidUserConfig {
-                        error: "mtls_client_provider capability is bound but http.tls.cert_file / \
-                                http.tls.key_file are also set; the capability owns TLS auth -- \
-                                remove the cert/key files or unbind the capability"
-                            .into(),
-                    });
-                }
+        if exporter.mtls_client.is_some()
+            && let Some(tls) = &exporter.config.http.tls
+        {
+            let cert_configured = tls.config.cert_file.is_some()
+                || tls
+                    .config
+                    .cert_pem
+                    .as_ref()
+                    .is_some_and(|pem| !pem.trim().is_empty());
+            let key_configured = tls.config.key_file.is_some()
+                || tls
+                    .config
+                    .key_pem
+                    .as_ref()
+                    .is_some_and(|pem| !pem.trim().is_empty());
+            if cert_configured || key_configured {
+                return Err(ConfigError::InvalidUserConfig {
+                    error: "mtls_client_provider capability is bound but http.tls \
+                                client identity fields (cert_file/cert_pem/key_file/key_pem) are \
+                                also set; the capability owns TLS auth -- remove those fields or \
+                                unbind the capability"
+                        .into(),
+                });
             }
         }
     }
@@ -1978,9 +1991,16 @@ mod test {
         };
 
         tokio_rt.block_on(async {
-            let mut pool = HttpClientPool::try_new(&settings, NonZeroUsize::new(1).unwrap())
-                .await
-                .expect("failed to build client pool");
+            let mut pool = HttpClientPool::try_new(
+                &settings,
+                NonZeroUsize::new(1).unwrap(),
+                #[cfg(feature = "mtls-transport")]
+                None,
+                #[cfg(feature = "mtls-transport")]
+                "",
+            )
+            .await
+            .expect("failed to build client pool");
             let client = pool.get_client();
             let resp = client
                 .post(format!("http://{endpoint_addr}/v1/logs"))
@@ -2033,6 +2053,8 @@ mod test {
                 config,
                 metrics: OtlpHttpExporterMetrics::register(&pipeline_ctx, None),
                 auth_provider: Some(Box::new(provider)),
+                #[cfg(feature = "mtls-transport")]
+                mtls_client: None,
             },
             node_id,
             node_config,
@@ -2557,6 +2579,8 @@ mod test {
                 config,
                 metrics: OtlpHttpExporterMetrics::register(&pipeline_ctx, None),
                 auth_provider: None,
+                #[cfg(feature = "mtls-transport")]
+                mtls_client: None,
             },
             node_id.clone(),
             node_config,

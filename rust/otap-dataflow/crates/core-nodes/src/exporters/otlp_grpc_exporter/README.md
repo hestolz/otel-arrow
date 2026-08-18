@@ -281,6 +281,39 @@ reuse that generation and resumes after the provider publishes a replacement. A
 delayed response for an older generation does not invalidate a newer
 credential.
 
+## mTLS capability binding
+
+When built with the `mtls-transport` feature, the exporter can source outbound
+mTLS from a bound `mtls_client_provider` capability instead of `grpc.tls`
+identity fields in node config.
+
+```yaml
+groups:
+  default:
+    pipelines:
+      main:
+        extensions:
+          mtls_provider:
+            type: "urn:example:extension:mtls_provider"
+            config: {}
+
+        nodes:
+          otlp-grpc-exporter:
+            type: "urn:otel:exporter:otlp_grpc"
+            capabilities:
+              mtls_client_provider: mtls_provider
+            config:
+              grpc_endpoint: "https://otlp.example.com:4317"
+```
+
+Behavior when the capability is bound:
+
+- gRPC channels use the capability-provided `rustls::ClientConfig`.
+- `startup_check: connect` uses the same capability-owned TLS path as runtime
+  channel establishment.
+- `grpc.tls` client identity fields (`cert_file`, `cert_pem`, `key_file`,
+  `key_pem`) must not be set at the same time; that configuration is rejected.
+
 ## Examples
 
 With request compression:

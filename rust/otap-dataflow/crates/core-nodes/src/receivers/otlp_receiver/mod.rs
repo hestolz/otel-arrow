@@ -245,19 +245,31 @@ pub static OTLP_RECEIVER: ReceiverFactory<OtapPdata> = ReceiverFactory {
                 .map_err(|e| otel_arrow_dfe_config::error::Error::InvalidUserConfig {
                     error: format!("mtls_server_provider binding error: {e}"),
                 })?;
-            if receiver.mtls_server.is_some() {
-                if let Some(grpc) = &receiver.config.protocols.grpc {
-                    if let Some(tls) = &grpc.tls {
-                        if tls.config.cert_file.is_some() || tls.config.key_file.is_some() {
-                            return Err(otel_arrow_dfe_config::error::Error::InvalidUserConfig {
-                                error: "mtls_server_provider capability is bound but \
-                                        grpc.tls.cert_file / grpc.tls.key_file are also set; the \
-                                        capability owns TLS auth -- remove the cert/key files or \
-                                        unbind the capability"
-                                    .into(),
-                            });
-                        }
-                    }
+            if receiver.mtls_server.is_some()
+                && let Some(grpc) = &receiver.config.protocols.grpc
+                && let Some(tls) = &grpc.tls
+            {
+                let cert_configured = tls.config.cert_file.is_some()
+                    || tls
+                        .config
+                        .cert_pem
+                        .as_ref()
+                        .is_some_and(|pem| !pem.trim().is_empty());
+                let key_configured = tls.config.key_file.is_some()
+                    || tls
+                        .config
+                        .key_pem
+                        .as_ref()
+                        .is_some_and(|pem| !pem.trim().is_empty());
+                if cert_configured || key_configured {
+                    return Err(otel_arrow_dfe_config::error::Error::InvalidUserConfig {
+                        error: "mtls_server_provider capability is bound but \
+                                        grpc.tls client identity fields \
+                                        (cert_file/cert_pem/key_file/key_pem) are also set; the \
+                                        capability owns TLS auth -- remove those fields or unbind \
+                                        the capability"
+                            .into(),
+                    });
                 }
             }
         }
@@ -1512,6 +1524,8 @@ mod tests {
                 rate_limiter: None,
                 global_max_concurrent_requests: None,
                 authorizer: None,
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             };
             receiver.tune_max_concurrent_requests(16);
 
@@ -2337,6 +2351,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2388,6 +2404,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2486,6 +2504,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2588,6 +2608,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2675,6 +2697,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2776,6 +2800,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2862,6 +2888,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -2936,6 +2964,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3036,6 +3066,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3102,6 +3134,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3177,6 +3211,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3268,6 +3304,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3336,6 +3374,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3403,6 +3443,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3504,6 +3546,8 @@ mod tests {
                 rate_limiter: None,
                 global_max_concurrent_requests: None,
                 authorizer: None,
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3588,6 +3632,8 @@ mod tests {
                 rate_limiter: None,
                 global_max_concurrent_requests: None,
                 authorizer: None,
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3687,6 +3733,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3768,6 +3816,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3836,6 +3886,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -3905,6 +3957,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4026,6 +4080,8 @@ mod tests {
                         as Box<dyn BearerTokenAuthorizer>
                 }),
                 admission_state,
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4151,6 +4207,8 @@ mod tests {
                 global_max_concurrent_requests: None,
                 authorizer: None,
                 admission_state,
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4295,6 +4353,8 @@ mod tests {
                 global_max_concurrent_requests: None,
                 authorizer: None,
                 admission_state,
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4425,6 +4485,8 @@ mod tests {
                 global_max_concurrent_requests: None,
                 authorizer: None,
                 admission_state,
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4513,6 +4575,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4615,6 +4679,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4698,6 +4764,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4789,6 +4857,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4849,6 +4919,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -4914,6 +4986,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -5036,6 +5110,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -5199,6 +5275,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -5313,6 +5391,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -5431,6 +5511,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -5538,6 +5620,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,
@@ -5633,6 +5717,8 @@ mod tests {
                 admission_state: SharedReceiverAdmissionState::from_process_state(
                     &pipeline_ctx.memory_pressure_state(),
                 ),
+                #[cfg(feature = "mtls-transport")]
+                mtls_server: None,
             },
             test_node(test_runtime.config().name.clone()),
             node_config,

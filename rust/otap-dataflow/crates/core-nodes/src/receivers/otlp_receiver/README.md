@@ -127,6 +127,41 @@ Common HTTP protocol fields include:
 - `accept_compressed_requests`
 - `tls`
 
+## mTLS capability binding
+
+When built with the `mtls-transport` feature, the receiver can source inbound
+gRPC mTLS from a bound `mtls_server_provider` capability instead of
+`protocols.grpc.tls` identity fields in node config.
+
+```yaml
+groups:
+  default:
+    pipelines:
+      main:
+        extensions:
+          mtls_provider:
+            type: "urn:example:extension:mtls_provider"
+            config: {}
+
+        nodes:
+          otlp-receiver:
+            type: "urn:otel:receiver:otlp"
+            capabilities:
+              mtls_server_provider: mtls_provider
+            config:
+              protocols:
+                grpc:
+                  listening_addr: "0.0.0.0:4317"
+```
+
+Behavior when the capability is bound:
+
+- The gRPC listener's TLS acceptor is built from the
+  capability-provided `rustls::ServerConfig`.
+- `protocols.grpc.tls` client identity fields (`cert_file`, `cert_pem`,
+  `key_file`, `key_pem`) must not be set at the same time; that configuration
+  is rejected.
+
 ## Examples
 
 gRPC and HTTP:
